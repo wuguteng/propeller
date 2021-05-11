@@ -1,0 +1,115 @@
+{{- define "propeller.virtualservice.tpl" -}}
+{{- if and .Values.service (or .Values.service.gateway .Values.service.gateways) }}
+---
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: {{ .Chart.Name }}-{{ .Chart.AppVersion }}
+  labels:
+    helm.sh/chart: "{{ $.Chart.Name }}-{{ $.Chart.Version }}"
+    app.kubernetes.io/instance: "{{ $.Release.Name }}"
+    app.kubernetes.io/version: "{{ $.Chart.AppVersion }}"
+    app.kubernetes.io/managed-by: "{{ $.Release.Service }}"
+spec:
+  hosts:
+  {{- if .Values.service.hosts }}
+  {{- toYaml .Values.service.hosts | indent 4 }}
+  {{- else }}
+  - "*"
+  {{- end }}
+  gateways:
+  {{- if .Values.service.gateways }}
+  {{- range $_, $gateway := .Values.service.gateways }}
+  - {{ $gateway }}
+  {{- end }}
+  {{- else }}
+  - {{ .Values.service.gateway }}
+  {{- end }}
+  http:
+  {{- if .Values.service.extraPorts }}
+  {{- range $p := .Values.service.extraPorts }}
+  {{- if and $p.path $p.port }}
+  - match:
+    - uri:
+        prefix: /{{ $.Release.Namespace }}/{{ $.Chart.Name }}/{{ $.Chart.AppVersion }}/{{ trimAll "/" $p.path }}/
+    - uri:
+        prefix: /{{ $.Release.Namespace }}/{{ $.Chart.Name }}/{{ trimAll "/" $p.path }}/
+    rewrite:
+      uri: /{{ trimAll "/" $p.path }}/
+    route:
+    - destination:
+        host: {{ $.Chart.Name }}
+        port:
+          number: {{ $p.port }}
+    {{- if $p.timeout }}
+    timeout: {{ $p.timeout }}
+    {{- else }}
+    timeout: 30s
+    {{- end }}
+  {{- end }}
+  {{- end }}
+  {{- end }}
+  - match:
+    - uri:
+        prefix: /{{ .Release.Namespace }}/{{ .Chart.Name }}/{{ .Chart.AppVersion }}/
+    - uri:
+        prefix: /{{ .Release.Namespace }}/{{ .Chart.Name }}/
+    {{- if ne .Values.labels.type "webapp0" }}
+    - uri:
+        exact: /{{ .Release.Namespace }}/{{ .Chart.Name }}/{{ .Chart.AppVersion }}
+    - uri:
+        exact: /{{ .Release.Namespace }}/{{ .Chart.Name }}
+    {{- end }}
+    {{- if eq .Values.labels.type "webapp0" }}
+    rewrite:
+      uri: /{{ .Chart.Name }}/
+    {{- else }}
+    rewrite:
+      uri: /
+    {{- end }}
+    route:
+    - destination:
+        host: {{ .Chart.Name }}
+        port:
+          number: {{ .Values.service.port }}
+    {{- if .Values.service.timeout }}
+    timeout: {{ .Values.service.timeout }}
+    {{- else }}
+    timeout: 30s
+    {{- end }}
+  {{- if eq .Values.labels.type "webapp0" }}
+  - match:
+    - uri:
+        exact: /{{ .Release.Namespace }}/{{ .Chart.Name }}
+    redirect:
+      uri: /{{ .Release.Namespace }}/{{ .Chart.Name }}/
+  - match:
+    - uri:
+        exact: /{{ .Release.Namespace }}/{{ .Chart.Name }}/{{ .Chart.AppVersion }}
+    redirect:
+      uri: /{{ .Release.Namespace }}/{{ .Chart.Name }}/{{ .Chart.AppVersion }}/
+    {{- if .Values.service.timeout }}
+    timeout: {{ .Values.service.timeout }}
+    {{- else }}
+    timeout: 30s
+    {{- end }}
+  {{- end }}
+  {{- if .Values.service.prefixUris }}
+  - match:
+    {{- range $uri := .Values.service.prefixUris }}
+    - uri:
+        prefix: /{{ $.Release.Namespace }}{{ $uri }}
+    {{- end }}
+    route:
+    - destination:
+        host: {{ .Chart.Name }}
+        port:
+          number: {{ $.Values.service.port }}
+    {{- if .Values.service.timeout }}
+    timeout: {{ .Values.service.timeout }}
+    {{- else }}
+    timeout: 30s
+    {{- end }}
+  {{- end }}
+{{- end }}
+{{- end }}

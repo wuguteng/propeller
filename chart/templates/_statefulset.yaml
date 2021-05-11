@@ -1,0 +1,349 @@
+{{- define "propeller.statefulset.tpl" -}}
+{{- $deploymentType := .Values.deploymentType | default "Deployment" -}}
+{{- if and .Values.appInitializement .Values.appInitializement.configFiles }}
+{{- range $i, $c := .Values.appInitializement.configFiles }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $.Chart.Name }}-{{ $.Chart.AppVersion }}-prepare-{{ $i }}
+  labels:
+    app: {{ $.Chart.Name }}
+    version: {{ $.Chart.AppVersion }}
+    helm.sh/chart: "{{ $.Chart.Name }}-{{ $.Chart.Version }}"
+    app.kubernetes.io/instance: "{{ $.Release.Name }}"
+    app.kubernetes.io/version: "{{ $.Chart.AppVersion }}"
+    app.kubernetes.io/managed-by: "{{ $.Release.Service }}"
+data:
+  prepare-{{ $i }}.sh: |
+    #!sh
+    {{- range $f := $c.files }}
+    {{- if $.Values.labels.baseimage }}
+    {{- if eq $.Values.labels.baseimage "ubuntu" }}
+    cmd="echo"
+    {{- else }}
+    cmd="echo -e"
+    {{- end }}
+    {{- else }}
+    cmd="echo -e"
+    {{- end }}
+    templ=`cat {{ $c.path }}/{{ $f.templateFile }}`
+    {{- if $f.exTemplate }}
+    extempl=`cat {{ $f.exTemplate }}`
+    ${cmd} "cat << EOF\n${templ}\n${extempl}\nEOF" | sh > {{ $c.path }}/{{ $f.file }}
+    {{- else }}
+    ${cmd} "cat << EOF\n${templ}\nEOF" | sh > {{ $c.path }}/{{ $f.file }}
+    {{- end }}
+    {{- if $c.debug }}
+    cat {{ $c.path }}/{{ $f.file }}
+    {{- end }}
+    {{- end }}
+{{- end }}
+{{- end }}
+{{- if eq $deploymentType "StatefulSet" }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ .Chart.Name }}-{{ splitList "." .Chart.AppVersion | join "-" }}
+  labels:
+    app: {{ .Chart.Name }}
+    version: {{ .Chart.AppVersion }}
+    {{- range $k, $v := .Values.labels }}
+    {{ $k }}: "{{ $v }}"
+    {{- end }}
+    helm.sh/chart: "{{ $.Chart.Name }}-{{ $.Chart.Version }}"
+    app.kubernetes.io/instance: "{{ $.Release.Name }}"
+    app.kubernetes.io/version: "{{ $.Chart.AppVersion }}"
+    app.kubernetes.io/managed-by: "{{ $.Release.Service }}"
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: {{ .Chart.Name }}
+      version: {{ .Chart.AppVersion }}
+  serviceName:  {{ .Chart.Name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Chart.Name }}
+        version: {{ .Chart.AppVersion }}
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.account }}
+      {{- if or (or .Values.dataPath (or .Values.appInitializement .Values.logPath) ) (or .Values.initContainers .Values.container.secrets ) }}
+      initContainers:
+      {{- if .Values.dataPath}}
+      - name: {{ .Chart.Name }}-init-datapath
+        securityContext:
+          privileged: true
+        image: {{ .Values.toolboxImage | default "busybox" }}
+        imagePullPolicy: {{ .Values.image.pullPolicy | default "IfNotPresent" }}
+        command:
+          - sh
+          - -c
+          - {{ if .Values.uid }}chown {{ .Values.uid }}:{{ .Values.uid }} -R {{ .Values.dataPath }} && {{ end }}chmod 0766 -R {{ .Values.dataPath }}
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.name
+        volumeMounts:
+        - name: {{ .Chart.Name }}-datapath
+          mountPath: {{ .Values.dataPath }}
+      {{- end }}
+      {{- if .Values.logPath}}
+      - name: {{ .Chart.Name }}-init-logpath
+        securityContext:
+          privileged: true
+        image: {{ .Values.toolboxImage | default "busybox" }}
+        imagePullPolicy: {{ .Values.image.pullPolicy | default "IfNotPresent" }}
+        command:
+          - sh
+          - -c
+          - {{ if .Values.uid }}chown {{ .Values.uid }}:{{ .Values.uid }} -R {{ .Values.logPath }} && {{ end }}chmod 0766 -R {{ .Values.logPath }}
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.name
+        volumeMounts:
+        - name: {{ .Chart.Name }}-logpath
+          mountPath: {{ .Values.logPath }}
+          subPathExpr: {{ .Values.labels.language | default "nolan" }}-{{ .Release.Namespace }}-$(POD_NAME)
+      {{- end }}
+      {{- if .Values.appInitializement }}
+      {{- $init := .Values.appInitializement }}
+      - name: {{ .Chart.Name }}-prepare
+        image: "{{ .Values.image.repository }}:{{ .Chart.AppVersion }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy | default "IfNotPresent" }}
+        command:
+        - sh
+        - -c
+        {{- range $i, $c := $init.configFiles }}
+        - sh /etc/config/prepare-{{ $i }}.sh && cp -rf {{ $c.path }}/* /data/{{ $.Chart.Name }}-appconfig-{{ $i }}/
+        {{- end }}
+        volumeMounts:
+        {{- range $i, $c := $init.configFiles }}
+        - name: {{ $.Chart.Name }}-prepare-{{ $i }}
+          mountPath: /etc/config/prepare-{{ $i }}.sh
+          subPath: prepare-{{ $i }}.sh
+        - name: {{ $.Chart.Name }}-appconfig-{{ $i }}
+          mountPath: /data/{{ $.Chart.Name }}-appconfig-{{ $i }}
+        {{- end }}
+        {{- if .Values.configMaps }}
+        {{- range $c := .Values.configMaps }}
+        {{- range $ckey, $_ := $c.data }}
+        - name: {{ $.Chart.Name }}-{{ $c.name }}
+          mountPath: {{ $c.mountPath }}/{{ $ckey }}
+          subPath: {{ $ckey }}
+        {{- end }}
+        {{- end }}
+        {{- end }}
+        {{- if or $init.env ( or $init.secrets $init.configMaps ) }}
+        env:
+        {{- if $init.env -}}
+        {{- include "propeller.expandEnv" $init.env | indent 8 -}}
+        {{- end -}}
+        {{- $secrets := dict "secrets" $init.secrets "ref" .Values.propeller -}}
+        {{- include "propeller.expandSecrets" $secrets | indent 8 -}}
+        {{- end }}
+      {{- if and $init.secrets $.Values.preCheckNetwork }}
+      {{- $secrets := dict "secrets" $init.secrets "ref" $.Values.propeller "container" "init" -}}
+      {{- include "propeller.checkConnectionBySecrets" $secrets | indent 6 -}}
+      {{- end }}
+      {{- end }}
+      {{- if and .Values.container.secrets .Values.preCheckNetwork }}
+      {{- $secrets := dict "secrets" .Values.container.secrets "ref" .Values.propeller "container" .Chart.Name -}}
+      {{- include "propeller.checkConnectionBySecrets" $secrets | indent 6 -}}
+      {{- end }}
+      {{- if .Values.initContainers }}
+      {{- range $init := .Values.initContainers }}
+      - name: {{ $init.name }}
+        {{- if eq $init.image "SAME_AS_CONTAINER" }}
+        image: "{{ $.Values.image.repository }}:{{ $.Chart.AppVersion }}"
+        {{- else }}
+        image: {{ $init.image }}
+        {{- end }}
+        imagePullPolicy: {{ $.Values.image.pullPolicy | default "IfNotPresent" }}
+        command:
+        {{- toYaml $init.command | nindent 10 }}
+        {{- if or $init.volumeMounts (eq $init.image "SAME_AS_CONTAINER") }}
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.name
+        volumeMounts:
+        {{- if $.Values.appInitializement }}
+        {{- range $i, $c := $.Values.appInitializement.configFiles }}
+        - name: {{ $.Chart.Name }}-appconfig-{{ $i }}
+          mountPath: {{ $c.path }}
+        {{- end }}
+        {{- end }}
+        {{- if $.Values.dataPath }}
+        - name: {{ $.Chart.Name }}-datapath
+          mountPath: {{ $.Values.dataPath }}
+        {{- end }}
+        {{- if $.Values.logPath }}
+        - name: {{ $.Chart.Name }}-logpath
+          mountPath: {{ $.Values.logPath }}
+          subPathExpr: {{ $.Values.labels.language | default "nolan" }}-{{ $.Release.Namespace }}-$(POD_NAME)
+        {{- end }}
+        {{- if $init.volumeMounts }}
+        {{- toYaml $init.volumeMounts | nindent 10 }}
+        {{- end }}
+        {{- end }}
+      {{- end }}
+      {{- end }}
+      {{- end }}
+      containers:
+      - name: {{ .Chart.Name }}
+        image: "{{ .Values.image.repository }}:{{ .Chart.AppVersion }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy | default "IfNotPresent" }}
+        {{- if and .Values.container .Values.container.port }}
+        ports:
+        - containerPort: {{ .Values.container.port }}
+          name: http
+        {{- else }}
+        {{- if and .Values.container .Values.container.ports }}
+        ports:
+        {{- range $p := .Values.container.ports }}
+        - containerPort: {{ $p.port }}
+          name: {{ $p.name | default ( printf "port-%s" ( toString $p.port ) ) }}
+        {{- end }}
+        {{- end }}
+        {{- end }}
+        resources:
+          requests:
+            cpu: {{ .Values.resources.requests.cpu }}
+            memory: {{ .Values.resources.requests.memory }}
+          limits:
+            cpu: {{ .Values.resources.limits.cpu }}
+            memory: {{ .Values.resources.limits.memory }}
+        {{- if and .Values.lifecycle .Values.lifecycle.postStartCommand }}
+        lifecycle:
+          postStart:
+            exec:
+              command:
+              {{- range $e := .Values.lifecycle.postStartCommand }}
+              - {{ $e }}
+              {{- end }}
+        {{- end }}
+        {{- if .Values.livenessProbe }}
+        livenessProbe:
+          {{- toYaml .Values.livenessProbe | nindent 12 }}
+        {{- end }}
+        {{- if .Values.readinessProbe }}
+        readinessProbe:
+          {{- toYaml .Values.readinessProbe | nindent 12 }}
+        {{- end }}
+        {{- if or (and .Values.appInitializement .Values.appInitializement.configFiles ) (or .Values.configMaps .Values.logPath ) }}
+        volumeMounts:
+        {{- if .Values.appInitializement }}
+        {{- range $i, $c := .Values.appInitializement.configFiles }}
+        - name: {{ $.Chart.Name }}-appconfig-{{ $i }}
+          mountPath: {{ $c.path }}
+        {{- end }}
+        {{- end }}
+        {{- if .Values.configMaps }}
+        {{- range $c := .Values.configMaps }}
+        {{- range $ckey, $_ := $c.data }}
+        - name: {{ $.Chart.Name }}-{{ $c.name }}
+          mountPath: {{ $c.mountPath }}/{{ $ckey }}
+          subPath: {{ $ckey }}
+        {{- end }}
+        {{- end }}
+        {{- end }}
+        {{- if .Values.dataPath }}
+        - name: {{ .Chart.Name }}-datapath
+          mountPath: {{ .Values.dataPath }}
+        {{- end }}
+        {{- if .Values.logPath }}
+        - name: {{ .Chart.Name }}-logpath
+          mountPath: {{ .Values.logPath }}
+          subPathExpr: {{ .Values.labels.language | default "nolan" }}-{{ .Release.Namespace }}-$(POD_NAME)
+        {{- end }}
+        {{- end }}
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.name
+        {{- if .Values.env -}}
+        {{- include "propeller.expandEnv" .Values.env | indent 8 -}}
+        {{- end -}}
+        {{- if and .Values.container .Values.container.secrets -}}
+        {{- $secrets := dict "secrets" .Values.container.secrets "ref" .Values.propeller -}}
+        {{- include "propeller.expandSecrets" $secrets | indent 8 -}}
+        {{- end }}
+      {{- if .Values.extraContainers }}
+      {{- range $c := .Values.extraContainers }}
+      - name: {{ $.Chart.Name }}-{{ $c.name }}
+        image: {{ $c.image }}
+        imagePullPolicy: {{ $.Values.image.pullPolicy | default "IfNotPresent" }}
+        {{- if $c.ports }}
+        ports:
+        {{- range $port := $c.ports }}
+        - containerPort: {{ $port }}
+          name: port-{{ $c.name }}
+        {{- end }}
+        {{- end }}
+        {{- if $c.command }}
+        command:
+        {{- range $arg := $c.command }}
+        - "{{ $arg }}"
+        {{- end }}
+        {{- end }}
+      {{- end }}
+      {{- end }}
+      {{- if or (and .Values.appInitializement .Values.appInitializement.configFiles ) (or .Values.configMaps .Values.logPath ) }}
+      volumes:
+      {{- if .Values.appInitializement }}
+      {{- range $i, $c := .Values.appInitializement.configFiles }}
+      - name: {{ $.Chart.Name }}-appconfig-{{ $i }}
+        emptyDir: {}
+      - name: {{ $.Chart.Name }}-prepare-{{ $i }}
+        configMap:
+          name: {{ $.Chart.Name }}-{{ $.Chart.AppVersion }}-prepare-{{ $i }}
+          items:
+          - key: prepare-{{ $i }}.sh
+            path: prepare-{{ $i }}.sh
+      {{- end }}
+      {{- end }}
+      {{- if .Values.configMaps }}
+      {{- range $c := .Values.configMaps }}
+      - name: {{ $.Chart.Name }}-{{ $c.name }}
+        configMap:
+          name: {{ $.Chart.Name }}-{{ $c.name }}
+          items:
+          {{- range $ckey, $_ := $c.data }}
+          - key: {{ $ckey }}
+            path: {{ $ckey }}
+          {{- end }}
+      {{- end }}
+      {{- end }}
+      {{- if .Values.logPath }}
+      - name: {{ .Chart.Name }}-logpath
+        hostPath:
+          path: /var/log/k8sapps
+          type: DirectoryOrCreate
+      {{- end }}
+      {{- end }}
+  volumeClaimTemplates:
+  - metadata:
+      name: {{ .Chart.Name }}-datapath
+      labels:
+        app: {{ .Chart.Name }}
+        version: {{ .Chart.AppVersion }}
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      storageClassName: {{ .Values.storage.storageClassName }}
+      resources:
+        requests:
+          storage: {{ .Values.storage.requests }}
+{{- end }}
+{{- end }}

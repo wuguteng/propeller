@@ -1,0 +1,23 @@
+{{- define "propeller.configmap.tpl" -}}
+{{- if .Values.configMaps }}
+{{- range $c := .Values.configMaps }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $.Chart.Name }}-{{ $c.name }}
+  labels:
+    app: {{ $.Chart.Name }}
+    version: {{ $.Chart.AppVersion }}
+    helm.sh/chart: "{{ $.Chart.Name }}-{{ $.Chart.Version }}"
+    app.kubernetes.io/instance: "{{ $.Release.Name }}"
+    app.kubernetes.io/version: "{{ $.Chart.AppVersion }}"
+    app.kubernetes.io/managed-by: "{{ $.Release.Service }}"
+data:
+  {{- range $key, $value := $c.data }}
+  {{ $key }}: |
+{{ $value | indent 4 }}
+  {{- end }}
+{{- end }}
+{{- end }}
+{{- end }}

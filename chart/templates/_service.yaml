@@ -1,0 +1,32 @@
+{{- define "propeller.service.tpl" -}}
+{{- if .Values.service }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Chart.Name }}
+  labels:
+    app: {{ .Chart.Name }}
+    version: {{ .Chart.AppVersion }}
+    service: {{ .Values.labels.service }}
+    helm.sh/chart: "{{ $.Chart.Name }}-{{ $.Chart.Version }}"
+    app.kubernetes.io/instance: "{{ $.Release.Name }}"
+    app.kubernetes.io/version: "{{ $.Chart.AppVersion }}"
+    app.kubernetes.io/managed-by: "{{ $.Release.Service }}"
+spec:
+  ports:
+    - port: {{ .Values.service.port }}
+      name: {{ .Values.service.portName | default "http" }}
+    {{- if .Values.service.extraPorts }}
+    {{- range $p := .Values.service.extraPorts }}
+    {{- if $p.port }}
+    - port: {{ $p.port }}
+      name: {{ $p.name | default ( printf "port-%s" ( toString $p.port ) ) }}
+    {{- end }}
+    {{- end }}
+    {{- end }}
+  selector:
+    app: {{ .Chart.Name }}
+    version: {{ .Chart.AppVersion }}
+{{- end }}
+{{- end }}
